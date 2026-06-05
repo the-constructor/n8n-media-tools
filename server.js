@@ -283,6 +283,18 @@ app.post('/image/crop', auth, upload.single('file'), async (req, res) => {
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('X-Width', String(Math.floor(cropWidth)));
     res.setHeader('X-Height', String(Math.floor(cropHeight)));
+    res.setHeader('Content-Type', 'image/png');
+
+    const originalName =
+      req.file.originalname || 'image';
+    
+    const baseName = originalName.replace(/\.[^/.]+$/, '');
+    
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${baseName}_crop.png"`
+    );
+    
     res.send(outputBuffer);
   } catch (e) {
     res.status(500).json({ error: e.message });
