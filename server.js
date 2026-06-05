@@ -22,18 +22,6 @@ function auth(req, res, next) {
   next();
 }
 
-function gcd(a, b) {
-  return b === 0 ? a : gcd(b, a % b);
-}
-
-function aspectRatio(width, height) {
-  const divisor = gcd(width, height);
-  return {
-    ratio: width / height,
-    label: `${width / divisor}:${height / divisor}`,
-  };
-}
-
 function requireFile(req, res) {
   if (!req.file) {
     res.status(400).json({
@@ -44,11 +32,96 @@ function requireFile(req, res) {
   return true;
 }
 
+function gcd(a, b) {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+function aspectRatioLabel(width, height) {
+  const divisor = gcd(width, height);
+  return `${width / divisor}:${height / divisor}`;
+}
+
+function buildSocialImageAnalysis({ width, height, mimeType, fileName, fileSizeBytes }) {
+  const ratio = width / height;
+
+  let orientation = 'square';
+  if (width > height) orientation = 'landscape';
+  if (height > width) orientation = 'portrait';
+
+  const MIN_RATIO = 0.56;
+  const MAX_RATIO = 1.91;
+
+  const needsCrop = ratio < MIN_RATIO || ratio > MAX_RATIO;
+
+  let targetRatio;
+  let targetFormat;
+  let target;
+
+  if (ratio < 0.8) {
+    targetRatio = 9 / 16;
+    targetFormat = 'portrait 9:16';
+    target = 'story';
+  } else if (ratio < 1.0) {
+    targetRatio = 4 / 5;
+    targetFormat = 'portrait 4:5';
+    target = 'feed';
+  } else if (ratio < 1.2) {
+    targetRatio = 1;
+    targetFormat = 'square';
+    target = 'feed';
+  } else if (ratio < 1.4) {
+    targetRatio = 4 / 3;
+    targetFormat = 'landscape 4:3';
+    target = 'feed';
+  } else {
+    targetRatio = Math.min(ratio, MAX_RATIO);
+    targetFormat = 'landscape 16:9';
+    target = 'feed';
+  }
+
+  let cropWidth = width;
+  let cropHeight = height;
+
+  if (ratio < MIN_RATIO) {
+    cropHeight = Math.floor(width / MIN_RATIO);
+  } else if (ratio > MAX_RATIO) {
+    cropWidth = Math.floor(height * MAX_RATIO);
+  }
+
+  return {
+    width,
+    height,
+    ratio: Number(ratio.toFixed(4)),
+    aspectRatio: Number(ratio.toFixed(4)),
+    aspectRatioLabel: aspectRatioLabel(width, height),
+    orientation,
+
+    instagramCompatible: ratio >= 0.56 && ratio <= 1.91,
+    facebookCompatible: ratio >= 0.56 && ratio <= 1.91,
+    linkedinCompatible: ratio >= 0.8 && ratio <= 1.91,
+    xCompatible: ratio >= 0.56 && ratio <= 2.0,
+
+    needsCrop,
+    target,
+    targetFormat,
+    targetRatio: Number(targetRatio.toFixed(4)),
+
+    cropWidth,
+    cropHeight,
+    cropLeft: Math.floor((width - cropWidth) / 2),
+    cropTop: Math.floor((height - cropHeight) / 2),
+
+    mimeType,
+    fileName,
+    fileSizeBytes,
+  };
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-app.get('/version', async (req, res) => {
+app.get('/version', (req, res) => {
   execFile('ffmpeg', ['-version'], (err, stdout) => {
     res.json({
       status: 'ok',
@@ -63,17 +136,26 @@ app.post('/image/metadata', auth, upload.single('file'), async (req, res) => {
 
   try {
     const meta = await sharp(req.file.path).metadata();
-    const ar = aspectRatio(meta.width, meta.height);
+
+    if (!meta.width || !meta.height) {
+      return res.status(422).json({
+        error: 'Image dimensions could not be detected',
+      });
+    }
+
+    const result = buildSocialImageAnalysis({
+      width: meta.width,
+      height: meta.height,
+      mimeType: req.file.mimetype,
+      fileName: req.file.originalname,
+      fileSizeBytes: req.file.size,
+    });
 
     res.json({
       type: 'image',
-      width: meta.width,
-      height: meta.height,
-      aspectRatio: ar.ratio,
-      aspectRatioLabel: ar.label,
       format: meta.format,
       channels: meta.channels,
-      size: req.file.size,
+      ...result,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -109,14 +191,16 @@ app.post('/video/metadata', auth, upload.single('file'), async (req, res) => {
       }
 
       const rotation = Number(stream.tags?.rotate || 0);
-      const displayWidth = Math.abs(rotation) === 90 || Math.abs(rotation) === 270
-        ? stream.height
-        : stream.width;
-      const displayHeight = Math.abs(rotation) === 90 || Math.abs(rotation) === 270
-        ? stream.width
-        : stream.height;
+      const displayWidth =
+        Math.abs(rotation) === 90 || Math.abs(rotation) === 270
+          ? stream.height
+          : stream.width;
+      const displayHeight =
+        Math.abs(rotation) === 90 || Math.abs(rotation) === 270
+          ? stream.width
+          : stream.height;
 
-      const ar = aspectRatio(displayWidth, displayHeight);
+      const ratio = displayWidth / displayHeight;
 
       res.json({
         type: 'video',
@@ -124,11 +208,21 @@ app.post('/video/metadata', auth, upload.single('file'), async (req, res) => {
         height: stream.height,
         displayWidth,
         displayHeight,
-        aspectRatio: ar.ratio,
-        aspectRatioLabel: ar.label,
+        ratio: Number(ratio.toFixed(4)),
+        aspectRatio: Number(ratio.toFixed(4)),
+        aspectRatioLabel: aspectRatioLabel(displayWidth, displayHeight),
+        orientation:
+          displayWidth > displayHeight
+            ? 'landscape'
+            : displayHeight > displayWidth
+              ? 'portrait'
+              : 'square',
         codec: stream.codec_name,
         duration: stream.duration ? Number(stream.duration) : null,
         rotation,
+        mimeType: req.file.mimetype,
+        fileName: req.file.originalname,
+        fileSizeBytes: req.file.size,
       });
     }
   );
