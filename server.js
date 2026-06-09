@@ -444,7 +444,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
     const targetWidth = even(Math.min(1280, targetWidthRaw));
     const targetHeight = even(Math.round(targetWidth * 16 / 9));
     const outputFps = fps > 25 ? 25 : Math.max(1, Math.round(fps));
-    const crf = 28; //Math.min(35, Math.max(18, Math.round(crfRaw)));
+    const crf = Math.min(35, Math.max(18, Math.round(crfRaw)));
 
     const midFrame = Math.max(0, Math.round(frameCount * 0.28));
     const midSecond = Math.max(0, midFrame / fps);
