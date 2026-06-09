@@ -376,6 +376,8 @@ app.post('/image/crop', auth, upload.single('file'), async (req, res) => {
 app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
   if (!requireFile(req, res)) return;
 
+  const startedAt = Date.now();
+
   const TMP_ROOT = '/tmp/media-tools';
   const MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
@@ -384,9 +386,25 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
   const jobDir = path.join(TMP_ROOT, `video-crop-${now}-${random}`);
 
   const inputFile = req.file.path;
-  const frameFile = path.join(jobDir, 'midframe.png');
-  const backgroundFile = path.join(jobDir, 'background.png');
+  const frameFile = path.join(jobDir, 'midframe.jpg');
+  const backgroundFile = path.join(jobDir, 'background.jpg');
   const outputFile = path.join(jobDir, 'output.mp4');
+
+  function even(n) {
+    return Math.floor(n / 2) * 2;
+  }
+
+  function run(command, args) {
+    return new Promise((resolve, reject) => {
+      execFile(command, args, { maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) {
+          err.message = stderr || err.message;
+          return reject(err);
+        }
+        resolve({ stdout, stderr });
+      });
+    });
+  }
 
   async function cleanupOldTempDirs() {
     await fs.mkdir(TMP_ROOT, { recursive: true }).catch(() => {});
@@ -406,96 +424,89 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
     );
   }
 
-  function run(command, args) {
-    return new Promise((resolve, reject) => {
-      execFile(command, args, { maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (err) {
-          err.message = stderr || err.message;
-          return reject(err);
-        }
-        resolve({ stdout, stderr });
-      });
-    });
-  }
-
   try {
     await cleanupOldTempDirs();
     await fs.mkdir(jobDir, { recursive: true });
 
     const fps = Number(req.body.fps ?? req.query.fps);
     const frameCount = Number(req.body.frameCount ?? req.query.frameCount);
-    const targetWidth = Number(req.body.targetWidth ?? req.query.targetWidth);
-    const targetHeight = Number(req.body.targetHeight ?? req.query.targetHeight);
+    const targetWidthRaw = Number(req.body.targetWidth ?? req.query.targetWidth);
 
-    if (![fps, frameCount, targetWidth, targetHeight].every(Number.isFinite)) {
-      await fs.unlink(inputFile).catch(() => {});
-      await fs.rm(jobDir, { recursive: true, force: true }).catch(() => {});
-
+    if (![fps, frameCount, targetWidthRaw].every(Number.isFinite)) {
       return res.status(400).json({
         error: 'Missing or invalid parameters',
-        required: ['fps', 'frameCount', 'targetWidth', 'targetHeight'],
+        required: ['fps', 'frameCount', 'targetWidth'],
       });
     }
 
-    const finalTargetWidth = Math.min(1200, Math.floor(targetWidth));
-    const finalTargetHeight = Math.floor(targetHeight);
+    const targetWidth = even(Math.min(1280, targetWidthRaw));
+    const targetHeight = even(Math.round(targetWidth * 16 / 9));
+    const outputFps = fps > 25 ? 25 : Math.max(1, Math.round(fps));
 
     const midFrame = Math.max(0, Math.round(frameCount * 0.28));
+    const midSecond = Math.max(0, midFrame / fps);
+    const outputDuration = Number((frameCount / fps).toFixed(3));
 
     await run('ffmpeg', [
       '-y',
+      '-ss', String(midSecond),
       '-i', inputFile,
-      '-vf', `select=eq(n\\,${midFrame})`,
       '-frames:v', '1',
+      '-q:v', '3',
       frameFile,
     ]);
 
     await sharp(frameFile)
       .resize({
-        width: finalTargetWidth,
-        height: finalTargetHeight,
+        width: targetWidth,
+        height: targetHeight,
         fit: 'cover',
         position: 'center',
+        withoutEnlargement: false,
       })
-      .modulate({
-        brightness: 0.6,
-      })
+      .modulate({ brightness: 0.6 })
       .blur(10)
-      .png()
+      .jpeg({ quality: 78, mozjpeg: true })
       .toFile(backgroundFile);
 
-    const shouldLimitFps = fps > 25;
+    const fpsFilter = fps > 25 ? ',fps=25' : '';
 
-    const videoFilter = shouldLimitFps
-      ? `[1:v]scale='min(${finalTargetWidth},iw)':-2:force_original_aspect_ratio=decrease,fps=25[fg];[0:v][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]`
-      : `[1:v]scale='min(${finalTargetWidth},iw)':-2:force_original_aspect_ratio=decrease[fg];[0:v][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]`;
+    const filterComplex =
+      `[1:v]scale='min(${targetWidth},iw)':'min(${targetHeight},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2${fpsFilter}[fg];` +
+      `[0:v][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]`;
 
     await run('ffmpeg', [
       '-y',
+      '-threads', '2',
 
       '-loop', '1',
+      '-framerate', String(outputFps),
       '-i', backgroundFile,
 
       '-i', inputFile,
 
-      '-filter_complex', videoFilter,
+      '-filter_complex', filterComplex,
 
       '-map', '[v]',
       '-map', '1:a?',
 
       '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-crf', '23',
+      '-preset', 'ultrafast',
+      '-crf', '26',
       '-pix_fmt', 'yuv420p',
 
       '-c:a', 'aac',
-      '-b:a', '128k',
+      '-b:a', '96k',
+      '-ac', '2',
 
       '-shortest',
       '-movflags', '+faststart',
 
       outputFile,
     ]);
+
+    const processingMs = Date.now() - startedAt;
+    const processingSeconds = Number((processingMs / 1000).toFixed(3));
 
     const originalName = req.file.originalname || 'video.mp4';
     const baseName = originalName.replace(/\.[^/.]+$/, '');
@@ -505,6 +516,13 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       'Content-Disposition',
       `attachment; filename="${baseName}_9x16_overlay.mp4"`
     );
+
+    res.setHeader('X-Processing-Ms', String(processingMs));
+    res.setHeader('X-Processing-Seconds', String(processingSeconds));
+    res.setHeader('X-Output-Width', String(targetWidth));
+    res.setHeader('X-Output-Height', String(targetHeight));
+    res.setHeader('X-Output-Fps', String(outputFps));
+    res.setHeader('X-Output-Duration', String(outputDuration));
 
     res.on('finish', async () => {
       await fs.unlink(inputFile).catch(() => {});
