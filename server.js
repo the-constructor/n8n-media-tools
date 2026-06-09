@@ -3,6 +3,7 @@ const multer = require('multer');
 const sharp = require('sharp');
 const { execFile } = require('child_process');
 const fs = require('fs/promises');
+const path = require('path');
 
 const app = express();
 
@@ -369,6 +370,152 @@ app.post('/image/crop', auth, upload.single('file'), async (req, res) => {
     res.status(500).json({ error: e.message });
   } finally {
     await fs.unlink(req.file.path).catch(() => {});
+  }
+});
+
+app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
+  if (!requireFile(req, res)) return;
+
+  const TMP_ROOT = '/tmp/media-tools';
+  const MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+  const now = Date.now();
+  const random = Math.random().toString(36).slice(2, 10);
+  const jobDir = path.join(TMP_ROOT, `video-crop-${now}-${random}`);
+
+  const inputFile = req.file.path;
+  const frameFile = path.join(jobDir, 'midframe.png');
+  const backgroundFile = path.join(jobDir, 'background.png');
+  const outputFile = path.join(jobDir, 'output.mp4');
+
+  async function cleanupOldTempDirs() {
+    await fs.mkdir(TMP_ROOT, { recursive: true }).catch(() => {});
+    const entries = await fs.readdir(TMP_ROOT, { withFileTypes: true }).catch(() => []);
+
+    await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry) => {
+          const fullPath = path.join(TMP_ROOT, entry.name);
+          const stat = await fs.stat(fullPath).catch(() => null);
+
+          if (stat && Date.now() - stat.mtimeMs > MAX_AGE_MS) {
+            await fs.rm(fullPath, { recursive: true, force: true }).catch(() => {});
+          }
+        })
+    );
+  }
+
+  function run(command, args) {
+    return new Promise((resolve, reject) => {
+      execFile(command, args, { maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) {
+          err.message = stderr || err.message;
+          return reject(err);
+        }
+        resolve({ stdout, stderr });
+      });
+    });
+  }
+
+  try {
+    await cleanupOldTempDirs();
+    await fs.mkdir(jobDir, { recursive: true });
+
+    const fps = Number(req.body.fps ?? req.query.fps);
+    const frameCount = Number(req.body.frameCount ?? req.query.frameCount);
+    const targetWidth = Number(req.body.targetWidth ?? req.query.targetWidth);
+    const targetHeight = Number(req.body.targetHeight ?? req.query.targetHeight);
+
+    if (![fps, frameCount, targetWidth, targetHeight].every(Number.isFinite)) {
+      await fs.unlink(inputFile).catch(() => {});
+      await fs.rm(jobDir, { recursive: true, force: true }).catch(() => {});
+
+      return res.status(400).json({
+        error: 'Missing or invalid parameters',
+        required: ['fps', 'frameCount', 'targetWidth', 'targetHeight'],
+      });
+    }
+
+    const finalTargetWidth = Math.min(1200, Math.floor(targetWidth));
+    const finalTargetHeight = Math.floor(targetHeight);
+
+    const midFrame = Math.max(0, Math.round(frameCount * 0.28));
+
+    await run('ffmpeg', [
+      '-y',
+      '-i', inputFile,
+      '-vf', `select=eq(n\\,${midFrame})`,
+      '-frames:v', '1',
+      frameFile,
+    ]);
+
+    await sharp(frameFile)
+      .resize({
+        width: finalTargetWidth,
+        height: finalTargetHeight,
+        fit: 'cover',
+        position: 'center',
+      })
+      .modulate({
+        brightness: 0.6,
+      })
+      .blur(10)
+      .png()
+      .toFile(backgroundFile);
+
+    const shouldLimitFps = fps > 25;
+
+    const videoFilter = shouldLimitFps
+      ? `[1:v]scale='min(${finalTargetWidth},iw)':-2:force_original_aspect_ratio=decrease,fps=25[fg];[0:v][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]`
+      : `[1:v]scale='min(${finalTargetWidth},iw)':-2:force_original_aspect_ratio=decrease[fg];[0:v][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]`;
+
+    await run('ffmpeg', [
+      '-y',
+
+      '-loop', '1',
+      '-i', backgroundFile,
+
+      '-i', inputFile,
+
+      '-filter_complex', videoFilter,
+
+      '-map', '[v]',
+      '-map', '1:a?',
+
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '23',
+      '-pix_fmt', 'yuv420p',
+
+      '-c:a', 'aac',
+      '-b:a', '128k',
+
+      '-shortest',
+      '-movflags', '+faststart',
+
+      outputFile,
+    ]);
+
+    const originalName = req.file.originalname || 'video.mp4';
+    const baseName = originalName.replace(/\.[^/.]+$/, '');
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${baseName}_9x16_overlay.mp4"`
+    );
+
+    res.on('finish', async () => {
+      await fs.unlink(inputFile).catch(() => {});
+      await fs.rm(jobDir, { recursive: true, force: true }).catch(() => {});
+    });
+
+    res.sendFile(outputFile);
+  } catch (e) {
+    await fs.unlink(inputFile).catch(() => {});
+    await fs.rm(jobDir, { recursive: true, force: true }).catch(() => {});
+    res.status(500).json({ error: e.message });
   }
 });
 
