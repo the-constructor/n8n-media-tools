@@ -172,7 +172,8 @@ app.post('/video/metadata', auth, upload.single('file'), async (req, res) => {
     [
       '-v', 'error',
       '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height,codec_name,duration:stream_tags=rotate',
+      '-show_entries',
+      'stream=width,height,codec_name,duration:stream_tags=rotate:stream_side_data=rotation,side_data_type',
       '-of', 'json',
       req.file.path,
     ],
@@ -183,47 +184,83 @@ app.post('/video/metadata', auth, upload.single('file'), async (req, res) => {
         return res.status(500).json({ error: stderr || err.message });
       }
 
-      const parsed = JSON.parse(stdout);
-      const stream = parsed.streams?.[0];
+      try {
+        const parsed = JSON.parse(stdout);
+        const stream = parsed.streams?.[0];
 
-      if (!stream?.width || !stream?.height) {
-        return res.status(422).json({ error: 'No video stream found' });
+        if (!stream?.width || !stream?.height) {
+          return res.status(422).json({ error: 'No video stream found' });
+        }
+
+        const tagRotation = Number(stream.tags?.rotate || 0);
+
+        const sideDataRotation = Number(
+          stream.side_data_list?.find((item) =>
+            typeof item.rotation !== 'undefined'
+          )?.rotation || 0
+        );
+
+        const rawRotation = tagRotation || sideDataRotation || 0;
+
+        const rotation = ((rawRotation % 360) + 360) % 360;
+
+        const isRotated90 =
+          rotation === 90 || rotation === 270;
+
+        const displayWidth = isRotated90 ? stream.height : stream.width;
+        const displayHeight = isRotated90 ? stream.width : stream.height;
+
+        const sourceRatio = stream.width / stream.height;
+        const displayRatio = displayWidth / displayHeight;
+
+        const sourceIs16x9 =
+          Math.abs(sourceRatio - 16 / 9) < 0.03 ||
+          Math.abs(sourceRatio - 9 / 16) < 0.03;
+
+        const rotatedMobile16x9Video =
+          sourceIs16x9 &&
+          isRotated90 &&
+          stream.width > stream.height &&
+          displayHeight > displayWidth;
+
+        const result = buildSocialImageAnalysis({
+          width: displayWidth,
+          height: displayHeight,
+          mimeType: req.file.mimetype,
+          fileName: req.file.originalname,
+          fileSizeBytes: req.file.size,
+        });
+
+        res.json({
+          type: 'video',
+
+          codec: stream.codec_name,
+          duration: stream.duration ? Number(stream.duration) : null,
+
+          sourceWidth: stream.width,
+          sourceHeight: stream.height,
+          sourceRatio: Number(sourceRatio.toFixed(4)),
+          sourceAspectRatioLabel: aspectRatioLabel(stream.width, stream.height),
+
+          displayWidth,
+          displayHeight,
+
+          rotation,
+          rawRotation,
+          isRotated90,
+          rotationSource: tagRotation
+            ? 'tag.rotate'
+            : sideDataRotation
+              ? 'side_data.rotation'
+              : null,
+
+          rotatedMobile16x9Video,
+
+          ...result,
+        });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
       }
-
-      const rotation = Number(stream.tags?.rotate || 0);
-      const displayWidth =
-        Math.abs(rotation) === 90 || Math.abs(rotation) === 270
-          ? stream.height
-          : stream.width;
-      const displayHeight =
-        Math.abs(rotation) === 90 || Math.abs(rotation) === 270
-          ? stream.width
-          : stream.height;
-
-      const ratio = displayWidth / displayHeight;
-
-      res.json({
-        type: 'video',
-        width: stream.width,
-        height: stream.height,
-        displayWidth,
-        displayHeight,
-        ratio: Number(ratio.toFixed(4)),
-        aspectRatio: Number(ratio.toFixed(4)),
-        aspectRatioLabel: aspectRatioLabel(displayWidth, displayHeight),
-        orientation:
-          displayWidth > displayHeight
-            ? 'landscape'
-            : displayHeight > displayWidth
-              ? 'portrait'
-              : 'square',
-        codec: stream.codec_name,
-        duration: stream.duration ? Number(stream.duration) : null,
-        rotation,
-        mimeType: req.file.mimetype,
-        fileName: req.file.originalname,
-        fileSizeBytes: req.file.size,
-      });
     }
   );
 });
