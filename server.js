@@ -167,13 +167,31 @@ app.post('/image/metadata', auth, upload.single('file'), async (req, res) => {
 app.post('/video/metadata', auth, upload.single('file'), async (req, res) => {
   if (!requireFile(req, res)) return;
 
+  function parseFps(value) {
+    if (!value || value === '0/0') return null;
+
+    const parts = value.split('/');
+
+    if (parts.length !== 2) {
+      const num = Number(value);
+      return Number.isFinite(num) ? num : null;
+    }
+
+    const numerator = Number(parts[0]);
+    const denominator = Number(parts[1]);
+
+    if (!denominator) return null;
+
+    return Number((numerator / denominator).toFixed(3));
+  }
+
   execFile(
     'ffprobe',
     [
       '-v', 'error',
       '-select_streams', 'v:0',
       '-show_entries',
-      'stream=width,height,codec_name,duration:stream_tags=rotate:stream_side_data=rotation,side_data_type',
+      'stream=width,height,codec_name,duration,avg_frame_rate,r_frame_rate,nb_frames:stream_tags=rotate:stream_side_data=rotation,side_data_type',
       '-of', 'json',
       req.file.path,
     ],
@@ -192,6 +210,18 @@ app.post('/video/metadata', auth, upload.single('file'), async (req, res) => {
           return res.status(422).json({ error: 'No video stream found' });
         }
 
+        const fps =
+          parseFps(stream.avg_frame_rate) ||
+          parseFps(stream.r_frame_rate);
+
+        let frameCount = null;
+
+        if (stream.nb_frames) {
+          frameCount = Number(stream.nb_frames);
+        } else if (fps && stream.duration) {
+          frameCount = Math.round(fps * Number(stream.duration));
+        }
+
         const tagRotation = Number(stream.tags?.rotate || 0);
 
         const sideDataRotation = Number(
@@ -201,17 +231,14 @@ app.post('/video/metadata', auth, upload.single('file'), async (req, res) => {
         );
 
         const rawRotation = tagRotation || sideDataRotation || 0;
-
         const rotation = ((rawRotation % 360) + 360) % 360;
 
-        const isRotated90 =
-          rotation === 90 || rotation === 270;
+        const isRotated90 = rotation === 90 || rotation === 270;
 
         const displayWidth = isRotated90 ? stream.height : stream.width;
         const displayHeight = isRotated90 ? stream.width : stream.height;
 
         const sourceRatio = stream.width / stream.height;
-        const displayRatio = displayWidth / displayHeight;
 
         const sourceIs16x9 =
           Math.abs(sourceRatio - 16 / 9) < 0.03 ||
@@ -236,6 +263,11 @@ app.post('/video/metadata', auth, upload.single('file'), async (req, res) => {
 
           codec: stream.codec_name,
           duration: stream.duration ? Number(stream.duration) : null,
+
+          fps,
+          frameCount,
+          avgFrameRate: stream.avg_frame_rate || null,
+          realFrameRate: stream.r_frame_rate || null,
 
           sourceWidth: stream.width,
           sourceHeight: stream.height,
