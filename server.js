@@ -431,17 +431,20 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
     const fps = Number(req.body.fps ?? req.query.fps);
     const frameCount = Number(req.body.frameCount ?? req.query.frameCount);
     const targetWidthRaw = Number(req.body.targetWidth ?? req.query.targetWidth);
+    const crfRaw = Number(req.body.crf ?? req.query.crf ?? 28);
 
-    if (![fps, frameCount, targetWidthRaw].every(Number.isFinite)) {
+    if (![fps, frameCount, targetWidthRaw, crfRaw].every(Number.isFinite)) {
       return res.status(400).json({
         error: 'Missing or invalid parameters',
         required: ['fps', 'frameCount', 'targetWidth'],
+        optional: ['crf'],
       });
     }
 
     const targetWidth = even(Math.min(1280, targetWidthRaw));
     const targetHeight = even(Math.round(targetWidth * 16 / 9));
     const outputFps = fps > 25 ? 25 : Math.max(1, Math.round(fps));
+    const crf = 28; //Math.min(35, Math.max(18, Math.round(crfRaw)));
 
     const midFrame = Math.max(0, Math.round(frameCount * 0.28));
     const midSecond = Math.max(0, midFrame / fps);
@@ -452,7 +455,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       '-ss', String(midSecond),
       '-i', inputFile,
       '-frames:v', '1',
-      '-q:v', '3',
+      '-q:v', '4',
       frameFile,
     ]);
 
@@ -466,7 +469,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       })
       .modulate({ brightness: 0.6 })
       .blur(10)
-      .jpeg({ quality: 78, mozjpeg: true })
+      .jpeg({ quality: 70, mozjpeg: true })
       .toFile(backgroundFile);
 
     const fpsFilter = fps > 25 ? ',fps=25' : '';
@@ -474,6 +477,8 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
     const filterComplex =
       `[1:v]scale='min(${targetWidth},iw)':'min(${targetHeight},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2${fpsFilter}[fg];` +
       `[0:v][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]`;
+
+    const encodingStartedAt = Date.now();
 
     await run('ffmpeg', [
       '-y',
@@ -492,7 +497,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
 
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
-      '-crf', '26',
+      '-crf', String(crf),
       '-pix_fmt', 'yuv420p',
 
       '-c:a', 'aac',
@@ -505,8 +510,10 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       outputFile,
     ]);
 
+    const encodingMs = Date.now() - encodingStartedAt;
     const processingMs = Date.now() - startedAt;
-    const processingSeconds = Number((processingMs / 1000).toFixed(3));
+
+    const outputStat = await fs.stat(outputFile);
 
     const originalName = req.file.originalname || 'video.mp4';
     const baseName = originalName.replace(/\.[^/.]+$/, '');
@@ -517,12 +524,16 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       `attachment; filename="${baseName}_9x16_overlay.mp4"`
     );
 
+    res.setHeader('X-Encoding-Ms', String(encodingMs));
+    res.setHeader('X-Encoding-Seconds', String(Number((encodingMs / 1000).toFixed(3))));
     res.setHeader('X-Processing-Ms', String(processingMs));
-    res.setHeader('X-Processing-Seconds', String(processingSeconds));
+    res.setHeader('X-Processing-Seconds', String(Number((processingMs / 1000).toFixed(3))));
     res.setHeader('X-Output-Width', String(targetWidth));
     res.setHeader('X-Output-Height', String(targetHeight));
     res.setHeader('X-Output-Fps', String(outputFps));
     res.setHeader('X-Output-Duration', String(outputDuration));
+    res.setHeader('X-Output-Crf', String(crf));
+    res.setHeader('X-Output-FileSize-Bytes', String(outputStat.size));
 
     res.on('finish', async () => {
       await fs.unlink(inputFile).catch(() => {});
