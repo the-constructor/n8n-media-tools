@@ -1223,6 +1223,210 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
   }
 });
 
+app.post(
+  '/video/test-transform',
+  auth,
+  upload.single('file'),
+  async (req, res) => {
+
+    if (!requireFile(req, res)) {
+      return;
+    }
+
+    const inputFile = req.file.path;
+
+    const format =
+      String(req.body.format || '')
+        .toLowerCase();
+
+    if (
+      format !== 'wide' &&
+      format !== 'tall'
+    ) {
+      return res.status(400).json({
+        error: 'format must be wide or tall'
+      });
+    }
+
+    const TMP_ROOT = '/tmp/media-tools';
+
+    const jobId =
+      `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    const jobDir =
+      path.join(
+        TMP_ROOT,
+        `job-${jobId}`
+      );
+
+    await fs.mkdir(
+      jobDir,
+      { recursive: true }
+    );
+
+    const outputFile =
+      path.join(
+        jobDir,
+        'test.mp4'
+      );
+
+    try {
+
+      const probe = await new Promise(
+        (resolve, reject) => {
+
+          execFile(
+            'ffprobe',
+            [
+              '-v', 'error',
+              '-select_streams', 'v:0',
+              '-show_entries',
+              'stream=width,height',
+              '-of', 'json',
+              inputFile
+            ],
+            (err, stdout) => {
+
+              if (err) {
+                return reject(err);
+              }
+
+              resolve(
+                JSON.parse(stdout)
+              );
+            }
+          );
+        }
+      );
+
+      const stream =
+        probe.streams?.[0];
+
+      const width =
+        stream.width;
+
+      const height =
+        stream.height;
+
+      let cropFilter;
+
+      if (format === 'wide') {
+
+        const targetWidth =
+          Math.round(
+            height * (21 / 9)
+          );
+
+        cropFilter =
+          `crop=${targetWidth}:${height}`;
+
+      } else {
+
+        const targetHeight =
+          Math.round(
+            width * (21 / 9)
+          );
+
+        cropFilter =
+          `crop=${width}:${targetHeight}`;
+      }
+
+      await new Promise(
+        (resolve, reject) => {
+
+          execFile(
+            'ffmpeg',
+            [
+              '-y',
+
+              '-i',
+              inputFile,
+
+              '-vf',
+              cropFilter,
+
+              '-c:v',
+              'libx264',
+
+              '-preset',
+              'ultrafast',
+
+              '-crf',
+              '30',
+
+              '-pix_fmt',
+              'yuv420p',
+
+              '-c:a',
+              'copy',
+
+              outputFile
+            ],
+            {
+              maxBuffer:
+                20 * 1024 * 1024
+            },
+            (err, stdout, stderr) => {
+
+              if (err) {
+                err.message =
+                  stderr ||
+                  err.message;
+
+                return reject(err);
+              }
+
+              resolve();
+            }
+          );
+        }
+      );
+
+      res.on(
+        'finish',
+        async () => {
+
+          await fs
+            .unlink(inputFile)
+            .catch(() => {});
+
+          await fs
+            .rm(
+              jobDir,
+              {
+                recursive: true,
+                force: true
+              }
+            )
+            .catch(() => {});
+        }
+      );
+
+      res.sendFile(outputFile);
+
+    } catch (e) {
+
+      await fs
+        .unlink(inputFile)
+        .catch(() => {});
+
+      await fs
+        .rm(
+          jobDir,
+          {
+            recursive: true,
+            force: true
+          }
+        )
+        .catch(() => {});
+
+      res.status(500).json({
+        error: e.message
+      });
+    }
+  }
+);
+
 app.listen(3000, '0.0.0.0', () => {
   console.log('Media Tools running on port 3000');
 });
