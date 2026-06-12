@@ -1193,7 +1193,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       '-filter_complex', filterComplex,
 
       '-map', '[v]',
-      '-map', '1:a?',
+      '-an',
 
       '-c:v', 'libx264',
       '-preset', config.preset,
@@ -1202,8 +1202,6 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       '-bf', '0',
       '-refs', '1',
       '-pix_fmt', 'yuv420p',
-
-      ...finalAudioArgs,
 
       '-r', String(outputFps),
       '-shortest',
