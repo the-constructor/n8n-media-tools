@@ -1142,15 +1142,15 @@ app.post('/video/processing', auth, upload.single('file'), async (req, res) => {
 
     if (effectiveMode === 'padding') {
       if (w > h) {
-        // 16:9 Zielcontainer
-        foregroundScaleFilter = `scale=${w}:-2,setsar=1`;
+        foregroundScaleFilter =
+          `setsar=1,scale=${w}:-2,setsar=1`;
       } else {
-        // 9:16 Zielcontainer
-        foregroundScaleFilter = `scale=-2:${h},setsar=1`;
+        foregroundScaleFilter =
+          `setsar=1,scale=-2:${h},setsar=1`;
       }
     }else if (effectiveMode === 'crop') {
-      foregroundScaleFilter = 
-        `scale=${w}:${h}:force_original_aspect_ratio=increase:force_divisible_by=2,crop=${w}:${h},setsar=1`;
+      foregroundScaleFilter =
+        `setsar=1,scale=${w}:${h}:force_original_aspect_ratio=increase:force_divisible_by=2,crop=${w}:${h},setsar=1`;
     }else {
       return res.status(400).json({
         error: 'Invalid transformMode',
@@ -1230,6 +1230,7 @@ app.post('/video/processing', auth, upload.single('file'), async (req, res) => {
     res.setHeader('X-Fast-Path', 'false');
     res.setHeader('X-Transformation', analysis.transformation || 'processing');
     res.setHeader('X-Transform-Mode', effectiveMode);
+    res.setHeader('X-Foreground-Scale-Filter', foregroundScaleFilter);
     res.setHeader('X-Analysis-Transform-Mode', analysis.transformMode || '');
     res.setHeader('X-Server-Profile', serverProfile);
     res.setHeader('X-Threads', String(threads));
