@@ -1142,12 +1142,44 @@ app.post('/video/processing', auth, upload.single('file'), async (req, res) => {
 
    if (effectiveMode === 'padding') {
 
-      foregroundScaleFilter =
-        `setsar=1,` +
-        `scale='min(${w},iw)':'min(${h},ih)':` +
-        `force_original_aspect_ratio=decrease:` +
-        `force_divisible_by=2,` +
-        `setsar=1`;
+      const inputW = Number(analysis.width);
+      const inputH = Number(analysis.height);
+
+      function even(n) {
+        return Math.floor(n / 2) * 2;
+      }
+
+      let foregroundScaleFilter;
+
+      if (effectiveMode === 'padding') {
+        const scaleFactor = Math.min(
+          1,
+          w / inputW,
+          h / inputH
+        );
+
+        const fgW = even(inputW * scaleFactor);
+        const fgH = even(inputH * scaleFactor);
+
+        foregroundScaleFilter =
+          `setsar=1,scale=${fgW}:${fgH},setsar=1`;
+
+      } else if (effectiveMode === 'crop') {
+
+        foregroundScaleFilter =
+          `setsar=1,` +
+          `scale=${w}:${h}:` +
+          `force_original_aspect_ratio=increase:` +
+          `force_divisible_by=2,` +
+          `crop=${w}:${h},` +
+          `setsar=1`;
+
+      } else {
+        return res.status(400).json({
+          error: 'Invalid transformMode',
+          allowed: ['crop', 'padding'],
+        });
+      }
 
     }else if (effectiveMode === 'crop') {
 
@@ -1166,9 +1198,9 @@ app.post('/video/processing', auth, upload.single('file'), async (req, res) => {
       });
     }
 
-const filterComplex =
-  `[1:v]${foregroundScaleFilter},showinfo[fg];` +
-  `[0:v][fg]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:shortest=1[v]`;
+    const filterComplex =
+      `[1:v]${foregroundScaleFilter}[fg];` +
+      `[0:v][fg]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:shortest=1[v]`;
 
     const hasAudio =
       Boolean(audioCodec) &&
