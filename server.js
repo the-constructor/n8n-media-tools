@@ -1228,200 +1228,219 @@ app.post(
   auth,
   upload.single('file'),
   async (req, res) => {
-
     if (!requireFile(req, res)) {
       return;
     }
 
+    const startedAt = Date.now();
+
     const inputFile = req.file.path;
 
-    const format =
-      String(req.body.format || '')
-        .toLowerCase();
+    const format = String(
+      req.body.format ||
+      req.query.format ||
+      ''
+    ).toLowerCase();
 
-    if (
-      format !== 'wide' &&
-      format !== 'tall'
-    ) {
+    if (format !== 'wide' && format !== 'tall') {
+      await fs.unlink(inputFile).catch(() => {});
+
       return res.status(400).json({
-        error: 'format must be wide or tall'
+        error: 'Invalid format. Use format=wide or format=tall.',
       });
     }
 
     const TMP_ROOT = '/tmp/media-tools';
+    const jobId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const jobDir = path.join(TMP_ROOT, `test-${jobId}`);
+    const outputFile = path.join(jobDir, `test-${format}.mp4`);
 
-    const jobId =
-      `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    function run(command, args) {
+      return new Promise((resolve, reject) => {
+        execFile(
+          command,
+          args,
+          {
+            maxBuffer: 20 * 1024 * 1024,
+          },
+          (err, stdout, stderr) => {
+            if (err) {
+              err.message = stderr || err.message;
+              return reject(err);
+            }
 
-    const jobDir =
-      path.join(
-        TMP_ROOT,
-        `job-${jobId}`
-      );
+            resolve({ stdout, stderr });
+          }
+        );
+      });
+    }
 
-    await fs.mkdir(
-      jobDir,
-      { recursive: true }
-    );
-
-    const outputFile =
-      path.join(
-        jobDir,
-        'test.mp4'
-      );
+    function even(n) {
+      return Math.floor(n / 2) * 2;
+    }
 
     try {
+      await fs.mkdir(jobDir, { recursive: true });
 
-      const probe = await new Promise(
-        (resolve, reject) => {
+      const { stdout } = await run('ffprobe', [
+        '-v',
+        'error',
 
-          execFile(
-            'ffprobe',
-            [
-              '-v', 'error',
-              '-select_streams', 'v:0',
-              '-show_entries',
-              'stream=width,height',
-              '-of', 'json',
-              inputFile
-            ],
-            (err, stdout) => {
+        '-select_streams',
+        'v:0',
 
-              if (err) {
-                return reject(err);
-              }
+        '-show_entries',
+        'stream=width,height,codec_name,duration,avg_frame_rate',
 
-              resolve(
-                JSON.parse(stdout)
-              );
-            }
-          );
-        }
-      );
+        '-of',
+        'json',
 
-      const stream =
-        probe.streams?.[0];
+        inputFile,
+      ]);
 
-      const width =
-        stream.width;
+      const parsed = JSON.parse(stdout);
+      const stream = parsed.streams?.[0];
 
-      const height =
-        stream.height;
-
-      let cropFilter;
-
-      if (format === 'wide') {
-
-        const targetWidth =
-          Math.round(
-            height * (21 / 9)
-          );
-
-        cropFilter =
-          `crop=${targetWidth}:${height}`;
-
-      } else {
-
-        const targetHeight =
-          Math.round(
-            width * (21 / 9)
-          );
-
-        cropFilter =
-          `crop=${width}:${targetHeight}`;
+      if (!stream?.width || !stream?.height) {
+        return res.status(422).json({
+          error: 'No video stream found',
+        });
       }
 
-      await new Promise(
-        (resolve, reject) => {
+      const width = Number(stream.width);
+      const height = Number(stream.height);
 
-          execFile(
-            'ffmpeg',
-            [
-              '-y',
+      let cropWidth;
+      let cropHeight;
+      let cropX;
+      let cropY;
+      let targetRatioLabel;
 
-              '-i',
-              inputFile,
+      if (format === 'wide') {
+        // 21:9 by reducing height; crop must stay inside source bounds.
+        cropWidth = width;
+        cropHeight = Math.floor(width / (21 / 9));
+        cropX = 0;
+        cropY = Math.floor((height - cropHeight) / 2);
+        targetRatioLabel = '21:9';
+      }
 
-              '-vf',
-              cropFilter,
+      else {
+        // 9:21 by reducing width; crop must stay inside source bounds.
+        cropHeight = height;
+        cropWidth = Math.floor(height * (9 / 21));
+        cropX = Math.floor((width - cropWidth) / 2);
+        cropY = 0;
+        targetRatioLabel = '9:21';
+      }
 
-              '-c:v',
-              'libx264',
+      cropWidth = even(cropWidth);
+      cropHeight = even(cropHeight);
+      cropX = even(Math.max(0, cropX));
+      cropY = even(Math.max(0, cropY));
 
-              '-preset',
-              'ultrafast',
+      if (
+        cropWidth <= 0 ||
+        cropHeight <= 0 ||
+        cropX < 0 ||
+        cropY < 0 ||
+        cropX + cropWidth > width ||
+        cropY + cropHeight > height
+      ) {
+        return res.status(400).json({
+          error: 'Calculated crop is outside source bounds',
+          source: {
+            width,
+            height,
+          },
+          crop: {
+            cropWidth,
+            cropHeight,
+            cropX,
+            cropY,
+          },
+        });
+      }
 
-              '-crf',
-              '30',
+      const cropFilter =
+        `crop=${cropWidth}:${cropHeight}:${cropX}:${cropY},setsar=1`;
 
-              '-pix_fmt',
-              'yuv420p',
+      await run('ffmpeg', [
+        '-y',
 
-              '-c:a',
-              'copy',
+        '-i',
+        inputFile,
 
-              outputFile
-            ],
-            {
-              maxBuffer:
-                20 * 1024 * 1024
-            },
-            (err, stdout, stderr) => {
+        '-vf',
+        cropFilter,
 
-              if (err) {
-                err.message =
-                  stderr ||
-                  err.message;
+        '-c:v',
+        'libx264',
 
-                return reject(err);
-              }
+        '-preset',
+        'ultrafast',
 
-              resolve();
-            }
-          );
-        }
+        '-crf',
+        '30',
+
+        '-bf',
+        '0',
+
+        '-refs',
+        '1',
+
+        '-pix_fmt',
+        'yuv420p',
+
+        '-c:a',
+        'copy',
+
+        '-movflags',
+        '+faststart',
+
+        outputFile,
+      ]);
+
+      const processingMs = Date.now() - startedAt;
+      const stat = await fs.stat(outputFile);
+
+      const originalName = req.file.originalname || 'test-video.mp4';
+      const baseName = originalName.replace(/\.[^/.]+$/, '');
+
+      res.setHeader('Content-Type', 'video/mp4');
+
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${baseName}_${format}_${targetRatioLabel.replace(':', 'x')}.mp4"`
       );
 
-      res.on(
-        'finish',
-        async () => {
+      res.setHeader('X-Test-Transform', format);
+      res.setHeader('X-Target-Ratio', targetRatioLabel);
+      res.setHeader('X-Input-Width', String(width));
+      res.setHeader('X-Input-Height', String(height));
+      res.setHeader('X-Crop-Width', String(cropWidth));
+      res.setHeader('X-Crop-Height', String(cropHeight));
+      res.setHeader('X-Crop-X', String(cropX));
+      res.setHeader('X-Crop-Y', String(cropY));
+      res.setHeader('X-Output-Width', String(cropWidth));
+      res.setHeader('X-Output-Height', String(cropHeight));
+      res.setHeader('X-Processing-Ms', String(processingMs));
+      res.setHeader('X-Output-Size', String(stat.size));
 
-          await fs
-            .unlink(inputFile)
-            .catch(() => {});
-
-          await fs
-            .rm(
-              jobDir,
-              {
-                recursive: true,
-                force: true
-              }
-            )
-            .catch(() => {});
-        }
-      );
+      res.on('finish', async () => {
+        await fs.unlink(inputFile).catch(() => {});
+        await fs.rm(jobDir, { recursive: true, force: true }).catch(() => {});
+      });
 
       res.sendFile(outputFile);
+    }
 
-    } catch (e) {
-
-      await fs
-        .unlink(inputFile)
-        .catch(() => {});
-
-      await fs
-        .rm(
-          jobDir,
-          {
-            recursive: true,
-            force: true
-          }
-        )
-        .catch(() => {});
+    catch (e) {
+      await fs.unlink(inputFile).catch(() => {});
+      await fs.rm(jobDir, { recursive: true, force: true }).catch(() => {});
 
       res.status(500).json({
-        error: e.message
+        error: e.message,
       });
     }
   }
