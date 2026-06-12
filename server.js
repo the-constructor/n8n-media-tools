@@ -1231,6 +1231,7 @@ const filterComplex =
     res.setHeader('X-Transformation', analysis.transformation || 'processing');
     res.setHeader('X-Transform-Mode', effectiveMode);
     res.setHeader('X-Foreground-Scale-Filter', foregroundScaleFilter);
+    res.setHeader('X-Filter-Complex', filterComplex);
     res.setHeader('X-Analysis-Transform-Mode', analysis.transformMode || '');
     res.setHeader('X-Server-Profile', serverProfile);
     res.setHeader('X-Threads', String(threads));
