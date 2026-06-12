@@ -1158,8 +1158,8 @@ app.post('/video/processing', auth, upload.single('file'), async (req, res) => {
       });
     }
 
-    const filterComplex =
-  `[1:v]${foregroundScaleFilter},showinfo[fg];` +
+const filterComplex =
+  `[1:v]${foregroundScaleFilter},drawbox=x=200:y=200:w=iw:h=ih:color=red@0.9:t=12[fg];` +
   `[0:v][fg]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:shortest=1[v]`;
 
     const hasAudio =
