@@ -1148,10 +1148,25 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       `[1:v]${foregroundScaleFilter}[fg];` +
       `[0:v][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]`;
 
+    const hasAudio =
+      Boolean(audioCodec) &&
+      audioCodec !== 'none' &&
+      audioCodec !== 'null' &&
+      audioCodec !== 'undefined';
+
+    const audioMapArgs =
+      hasAudio
+        ? ['-map', '1:a?']
+        : [];
+
     const audioArgs =
-      audioCodec === 'aac'
-        ? ['-c:a', 'copy']
-        : ['-c:a', 'aac', '-b:a', '96k', '-ac', '2'];
+      hasAudio
+        ? (
+            audioCodec === 'aac'
+              ? ['-c:a', 'copy']
+              : ['-c:a', 'aac', '-b:a', '96k', '-ac', '2']
+          )
+        : ['-an'];
 
     await runFfmpeg([
       '-y',
@@ -1166,7 +1181,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       '-filter_complex', filterComplex,
 
       '-map', '[v]',
-      '-map', '1:a?',
+      ...audioMapArgs,
 
       '-c:v', 'libx264',
       '-preset', config.preset,
