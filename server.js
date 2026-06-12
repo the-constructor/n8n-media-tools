@@ -1131,58 +1131,56 @@ app.post('/video/processing', auth, upload.single('file'), async (req, res) => {
     const encodingStartedAt = Date.now();
 
     const effectiveMode =
-      transformMode ||
-      (
-        analysis.transformMode?.startsWith('padding')
-          ? 'padding'
-          : 'crop'
-      );
+      transformMode === 'padding' || transformMode === 'crop'
+        ? transformMode
+        : (
+            String(analysis.transformMode || '').startsWith('padding')
+              ? 'padding'
+              : 'crop'
+          );
 
-    let foregroundScaleFilter;
+    const inputW = Number(analysis.width);
+    const inputH = Number(analysis.height);
 
-   if (effectiveMode === 'padding') {
+    function even(n) {
+      return Math.max(2, Math.floor(n / 2) * 2);
+    }
 
-      const inputW = Number(analysis.width);
-      const inputH = Number(analysis.height);
+    let foregroundScaleFilter = '';
 
-      function even(n) {
-        return Math.floor(n / 2) * 2;
-      }
-
-      let foregroundScaleFilter;
-
-      if (effectiveMode === 'padding') {
-        const scaleFactor = Math.min(
-          1,
-          w / inputW,
-          h / inputH
-        );
-
-        const fgW = even(inputW * scaleFactor);
-        const fgH = even(inputH * scaleFactor);
-
-        foregroundScaleFilter =
-          `setsar=1,scale=${fgW}:${fgH},setsar=1`;
-
-      } else if (effectiveMode === 'crop') {
-
-        foregroundScaleFilter =
-          `setsar=1,` +
-          `scale=${w}:${h}:` +
-          `force_original_aspect_ratio=increase:` +
-          `force_divisible_by=2,` +
-          `crop=${w}:${h},` +
-          `setsar=1`;
-
-      } else {
+    if (effectiveMode === 'padding') {
+      if (
+        ![inputW, inputH, w, h].every(Number.isFinite) ||
+        inputW <= 0 ||
+        inputH <= 0 ||
+        w <= 0 ||
+        h <= 0
+      ) {
         return res.status(400).json({
-          error: 'Invalid transformMode',
-          allowed: ['crop', 'padding'],
+          error: 'Invalid dimensions for padding mode',
+          required: [
+            'analysis.width',
+            'analysis.height',
+            'analysis.recommendedWidth',
+            'analysis.recommendedHeight',
+          ],
         });
       }
 
-    }else if (effectiveMode === 'crop') {
+      const scaleFactor = Math.min(
+        1,
+        w / inputW,
+        h / inputH
+      );
 
+      const fgW = even(inputW * scaleFactor);
+      const fgH = even(inputH * scaleFactor);
+
+      foregroundScaleFilter =
+        `setsar=1,scale=${fgW}:${fgH},setsar=1`;
+    }
+
+    else if (effectiveMode === 'crop') {
       foregroundScaleFilter =
         `setsar=1,` +
         `scale=${w}:${h}:` +
@@ -1190,11 +1188,21 @@ app.post('/video/processing', auth, upload.single('file'), async (req, res) => {
         `force_divisible_by=2,` +
         `crop=${w}:${h},` +
         `setsar=1`;
+    }
 
-    }else {
+    else {
       return res.status(400).json({
         error: 'Invalid transformMode',
         allowed: ['crop', 'padding'],
+      });
+    }
+
+    if (!foregroundScaleFilter) {
+      return res.status(500).json({
+        error: 'foregroundScaleFilter was not generated',
+        effectiveMode,
+        transformMode,
+        analysisTransformMode: analysis.transformMode,
       });
     }
 
