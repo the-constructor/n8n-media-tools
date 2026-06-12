@@ -973,6 +973,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
 
   const frameFile = path.join(jobDir, 'midframe.jpg');
   const backgroundFile = path.join(jobDir, 'background.jpg');
+  const foregroundFile = path.join(jobDir, 'foreground.mp4');
   const outputFile = path.join(jobDir, 'output.mp4');
 
   async function cleanupOldTempDirs() {
@@ -1129,13 +1130,52 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
 
     const backgroundMs = Date.now() - backgroundStartedAt;
 
+    // -----------------------------
+    // PRE-SCALE FOREGROUND VIDEO
+    // -----------------------------
+    const foregroundStartedAt = Date.now();
+
+    const foregroundAudioArgs =
+      audioCodec === 'aac'
+        ? ['-c:a', 'copy']
+        : ['-c:a', 'aac', '-b:a', '96k', '-ac', '2'];
+
+    await runFfmpeg([
+      '-y',
+      '-threads', String(threads),
+
+      '-i', inputFile,
+
+      '-vf',
+      `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1`,
+
+      '-c:v', 'libx264',
+      '-preset', config.preset,
+      '-tune', 'fastdecode',
+      '-crf', String(Math.min(35, config.crf + 2)),
+      '-bf', '0',
+      '-refs', '1',
+      '-pix_fmt', 'yuv420p',
+
+      ...foregroundAudioArgs,
+
+      '-r', String(outputFps),
+      '-shortest',
+
+      foregroundFile,
+    ]);
+
+    const foregroundMs = Date.now() - foregroundStartedAt;
+
+    // -----------------------------
+    // FINAL OVERLAY ENCODE
+    // -----------------------------
     const encodingStartedAt = Date.now();
 
     const filterComplex =
-      `[1:v]scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg];` +
-      `[0:v][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]`;
+      `[0:v][1:v]overlay=(W-w)/2:(H-h)/2:shortest=1[v]`;
 
-    const audioArgs =
+    const finalAudioArgs =
       audioCodec === 'aac'
         ? ['-c:a', 'copy']
         : ['-c:a', 'aac', '-b:a', '96k', '-ac', '2'];
@@ -1148,7 +1188,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       '-framerate', String(outputFps),
       '-i', backgroundFile,
 
-      '-i', inputFile,
+      '-i', foregroundFile,
 
       '-filter_complex', filterComplex,
 
@@ -1163,9 +1203,8 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       '-refs', '1',
       '-pix_fmt', 'yuv420p',
 
-      ...audioArgs,
+      ...finalAudioArgs,
 
-      '-movflags', '+faststart',
       '-r', String(outputFps),
       '-shortest',
 
@@ -1196,6 +1235,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
 
     res.setHeader('X-Frame-Extract-Ms', String(frameMs));
     res.setHeader('X-Background-Ms', String(backgroundMs));
+    res.setHeader('X-Foreground-Ms', String(foregroundMs));
     res.setHeader('X-Encoding-Ms', String(encodingMs));
     res.setHeader('X-Processing-Ms', String(processingMs));
 
