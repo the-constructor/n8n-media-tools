@@ -55,7 +55,7 @@ const MEDIA_FORMATS = {
     label: '9:16',
     ratio: 9 / 16,
     image: { width: 1080, height: 1920 },
-    video: { width: 1080, height: 1920 },
+    video: { width: 900, height: 1600 },
   },
   PORTRAIT_4_5: {
     key: 'portrait_4_5',
@@ -69,14 +69,14 @@ const MEDIA_FORMATS = {
     label: '1:1',
     ratio: 1,
     image: { width: 1080, height: 1080 },
-    video: { width: 1080, height: 1080 },
+    video: { width: 1600, height: 1600 },
   },
   LANDSCAPE_16_9: {
     key: 'landscape_16_9',
     label: '16:9',
     ratio: 16 / 9,
     image: { width: 1200, height: 675 },
-    video: { width: 1280, height: 720 },
+    video: { width: 1600, height: 900 },
   },
 };
 
@@ -1140,17 +1140,25 @@ app.post('/video/processing', auth, upload.single('file'), async (req, res) => {
 
     let foregroundScaleFilter;
 
-    if (effectiveMode === 'padding') {
-      if (w > h) {
-        foregroundScaleFilter =
-          `setsar=1,scale=${w}:-2,setsar=1`;
-      } else {
-        foregroundScaleFilter =
-          `setsar=1,scale=-2:${h},setsar=1`;
-      }
-    }else if (effectiveMode === 'crop') {
+   if (effectiveMode === 'padding') {
+
       foregroundScaleFilter =
-        `setsar=1,scale=${w}:${h}:force_original_aspect_ratio=increase:force_divisible_by=2,crop=${w}:${h},setsar=1`;
+        `setsar=1,` +
+        `scale='min(${w},iw)':'min(${h},ih)':` +
+        `force_original_aspect_ratio=decrease:` +
+        `force_divisible_by=2,` +
+        `setsar=1`;
+
+    }else if (effectiveMode === 'crop') {
+
+      foregroundScaleFilter =
+        `setsar=1,` +
+        `scale=${w}:${h}:` +
+        `force_original_aspect_ratio=increase:` +
+        `force_divisible_by=2,` +
+        `crop=${w}:${h},` +
+        `setsar=1`;
+
     }else {
       return res.status(400).json({
         error: 'Invalid transformMode',
@@ -1159,7 +1167,7 @@ app.post('/video/processing', auth, upload.single('file'), async (req, res) => {
     }
 
 const filterComplex =
-  `[1:v]${foregroundScaleFilter},drawbox=x=200:y=200:w=iw:h=ih:color=red@0.9:t=12[fg];` +
+  `[1:v]${foregroundScaleFilter},showinfo[fg];` +
   `[0:v][fg]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:shortest=1[v]`;
 
     const hasAudio =
@@ -1231,7 +1239,6 @@ const filterComplex =
     res.setHeader('X-Transformation', analysis.transformation || 'processing');
     res.setHeader('X-Transform-Mode', effectiveMode);
     res.setHeader('X-Foreground-Scale-Filter', foregroundScaleFilter);
-    res.setHeader('X-Filter-Complex', filterComplex);
     res.setHeader('X-Analysis-Transform-Mode', analysis.transformMode || '');
     res.setHeader('X-Server-Profile', serverProfile);
     res.setHeader('X-Threads', String(threads));
