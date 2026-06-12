@@ -231,7 +231,7 @@ function buildSocialMediaAnalysis({
   }
 
   else if (formatClass === 'ultrawide') {
-    transformation = 'crop';
+    transformation = 'processing';
 
     if (isImage) {
       transformMode = 'crop-to-16-9';
@@ -242,13 +242,13 @@ function buildSocialMediaAnalysis({
     }
 
     else {
-      transformMode = 'blur-background-to-16-9';
+      transformMode = 'crop-to-16-9';
       setTarget('LANDSCAPE_16_9');
     }
   }
 
   else if (formatClass === 'ultratall') {
-    transformation = 'crop';
+    transformation = 'processing';
 
     if (isImage) {
       transformMode = 'crop-to-4-5';
@@ -259,7 +259,7 @@ function buildSocialMediaAnalysis({
     }
 
     else {
-      transformMode = 'blur-background-to-9-16';
+      transformMode = 'crop-to-9-16';
       setTarget('VERTICAL_9_16');
     }
   }
@@ -273,7 +273,7 @@ function buildSocialMediaAnalysis({
   const needsReencode =
     isVideo &&
     (
-      transformation === 'crop' ||
+      transformation === 'processing' ||
       (
         normalizedCodec &&
         normalizedCodec !== 'h264'
@@ -285,8 +285,8 @@ function buildSocialMediaAnalysis({
     );
 
   const transformEndpoint =
-    transformation === 'crop'
-      ? `/${isVideo ? 'video' : 'image'}/crop`
+    transformation === 'processing'
+      ? `/${isVideo ? 'video' : 'image'}/processing`
       : null;
 
   function route({
@@ -801,7 +801,7 @@ app.post(
 );
 
 app.post(
-  '/image/crop',
+  '/image/processing',
   auth,
   upload.single('file'),
   async (req, res) => {
@@ -827,7 +827,7 @@ app.post(
       if (
         analysis &&
         analysis.type === 'image' &&
-        analysis.transformation === 'crop'
+        analysis.transformation === 'processing'
       ) {
         cropWidth = Number(analysis.cropWidth);
         cropHeight = Number(analysis.cropHeight);
@@ -959,7 +959,7 @@ app.post(
   }
 );
 
-app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
+app.post('/video/processing', auth, upload.single('file'), async (req, res) => {
   if (!requireFile(req, res)) return;
 
   const startedAt = Date.now();
@@ -1026,7 +1026,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
       });
     }
 
-    if (analysis.transformation !== 'crop') {
+    if (analysis.transformation !== 'processing') {
       const stat = await fs.stat(inputFile);
       const processingMs = Date.now() - startedAt;
 
@@ -1049,6 +1049,7 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
     const fps = Number(analysis.fps || 25);
     const duration = Number(analysis.duration || 0);
     const audioCodec = String(analysis.audioCodec || '').toLowerCase();
+    const transformMode = String(req.body.transformMode || req.query.transformMode || '').toLowerCase();
 
     if (![w, h, fps].every(Number.isFinite) || w <= 0 || h <= 0) {
       return res.status(400).json({
@@ -1129,19 +1130,32 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
 
     const encodingStartedAt = Date.now();
 
+    const effectiveMode =
+      transformMode ||
+      (
+        analysis.transformMode?.startsWith('padding')
+          ? 'padding'
+          : 'crop'
+      );
+
     let foregroundScaleFilter;
 
-    if (analysis.transformMode === 'blur-background-to-16-9') {
-      foregroundScaleFilter = `scale=${w}:-2,setsar=1`;
-    }
-
-    else if (analysis.transformMode === 'blur-background-to-9-16') {
-      foregroundScaleFilter = `scale=-2:${h},setsar=1`;
-    }
-
-    else {
-      foregroundScaleFilter =
-        `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1`;
+    if (effectiveMode === 'padding') {
+      if (w > h) {
+        // 16:9 Zielcontainer
+        foregroundScaleFilter = `scale=${w}:-2,setsar=1`;
+      } else {
+        // 9:16 Zielcontainer
+        foregroundScaleFilter = `scale=-2:${h},setsar=1`;
+      }
+    }else if (effectiveMode === 'crop') {
+      foregroundScaleFilter = 
+        `scale=${w}:${h}:force_original_aspect_ratio=increase:force_divisible_by=2,crop=${w}:${h},setsar=1`;
+    }else {
+      return res.status(400).json({
+        error: 'Invalid transformMode',
+        allowed: ['crop', 'padding'],
+      });
     }
 
     const filterComplex =
@@ -1210,12 +1224,13 @@ app.post('/video/crop', auth, upload.single('file'), async (req, res) => {
 
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="${baseName}_${analysis.transformMode || 'video_crop'}.mp4"`
+      `attachment; filename="${baseName}_${effectiveMode || 'video_processed'}.mp4"`
     );
 
     res.setHeader('X-Fast-Path', 'false');
-    res.setHeader('X-Transformation', analysis.transformation || 'crop');
-    res.setHeader('X-Transform-Mode', analysis.transformMode || '');
+    res.setHeader('X-Transformation', analysis.transformation || 'processing');
+    res.setHeader('X-Transform-Mode', effectiveMode);
+    res.setHeader('X-Analysis-Transform-Mode', analysis.transformMode || '');
     res.setHeader('X-Server-Profile', serverProfile);
     res.setHeader('X-Threads', String(threads));
     res.setHeader('X-Preset', config.preset);
